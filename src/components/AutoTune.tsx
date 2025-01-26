@@ -5,24 +5,29 @@ import { PitchDetector } from 'pitchy';
 import * as Tone from 'tone';
 
 const INTERVALS = {
-  '3rd': 4,
-  '5th': 7,
-  '8th': 12
+  '3rd': 1.25, // Perfect third (5:4 ratio)
+  '5th': 1.5,  // Perfect fifth (3:2 ratio)
+  '8th': 2.0   // Octave (2:1 ratio)
 };
 
 interface AudioState {
   pitch: number;
   clarity: number;
   note: string;
+  harmonyNote: string;
 }
 
 export default function AutoTune() {
   const [isRecording, setIsRecording] = useState(false);
   const [selectedInterval, setSelectedInterval] = useState<keyof typeof INTERVALS>('3rd');
-  const [audioState, setAudioState] = useState<AudioState>({ pitch: 0, clarity: 0, note: '-' });
+  const [audioState, setAudioState] = useState<AudioState>({ 
+    pitch: 0, 
+    clarity: 0, 
+    note: '-',
+    harmonyNote: '-' 
+  });
   const [volume, setVolume] = useState(0.5);
-  const [inputGain, setInputGain] = useState(0.3);
-  const [effectMix, setEffectMix] = useState(0.7);
+  const [harmonyVolume, setHarmonyVolume] = useState(0.5);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -47,9 +52,9 @@ export default function AutoTune() {
       wetGainRef.current = ctx.createGain();
 
       // Set initial gains
-      dryGainRef.current.gain.value = 1 - effectMix;
-      wetGainRef.current.gain.value = effectMix;
-      gainNodeRef.current.gain.value = volume;
+      dryGainRef.current.gain.value = volume;
+      wetGainRef.current.gain.value = harmonyVolume;
+      gainNodeRef.current.gain.value = 1.0;
 
       // Create pitch detector
       const detector = PitchDetector.forFloat32Array(2048);
@@ -64,28 +69,40 @@ export default function AutoTune() {
         const [pitch, clarity] = detector.findPitch(inputBuffer, ctx.sampleRate);
 
         if (clarity > 0.8) {
-          // Update audio state
+          // Calculate harmony frequency
+          const harmonyFreq = pitch * INTERVALS[selectedInterval];
           const note = frequencyToNote(pitch);
-          setAudioState({ pitch, clarity, note });
+          const harmonyNote = frequencyToNote(harmonyFreq);
+          
+          setAudioState({ 
+            pitch, 
+            clarity, 
+            note,
+            harmonyNote 
+          });
 
-          // Apply pitch correction
-          const correctedFreq = correctPitch(pitch, INTERVALS[selectedInterval]);
+          // Update oscillator frequency
           if (oscillatorRef.current) {
-            oscillatorRef.current.frequency.setValueAtTime(correctedFreq, ctx.currentTime);
+            oscillatorRef.current.frequency.setValueAtTime(harmonyFreq, ctx.currentTime);
           }
         }
       };
 
-      // Connect nodes
+      // Connect nodes for original sound
       sourceRef.current
-        .connect(analyserRef.current)
-        .connect(processorNode)
         .connect(dryGainRef.current)
         .connect(ctx.destination);
 
+      // Connect nodes for harmony
       oscillatorRef.current
         .connect(wetGainRef.current)
         .connect(gainNodeRef.current)
+        .connect(ctx.destination);
+
+      // Connect analyzer
+      sourceRef.current
+        .connect(analyserRef.current)
+        .connect(processorNode)
         .connect(ctx.destination);
 
       oscillatorRef.current.start();
@@ -106,7 +123,12 @@ export default function AutoTune() {
       gainNodeRef.current?.disconnect();
       audioContextRef.current.close();
       setIsRecording(false);
-      setAudioState({ pitch: 0, clarity: 0, note: '-' });
+      setAudioState({ 
+        pitch: 0, 
+        clarity: 0, 
+        note: '-',
+        harmonyNote: '-' 
+      });
     }
   };
 
@@ -118,24 +140,17 @@ export default function AutoTune() {
     return `${noteName}${octave}`;
   };
 
-  const correctPitch = (frequency: number, interval: number): number => {
-    const midiNumber = Math.round(12 * Math.log2(frequency / 440) + 69);
-    const correctedMidi = Math.round(midiNumber / interval) * interval;
-    return 440 * Math.pow(2, (correctedMidi - 69) / 12);
-  };
-
-  const updateEffectMix = (value: number) => {
-    setEffectMix(value);
-    if (dryGainRef.current && wetGainRef.current) {
-      dryGainRef.current.gain.value = 1 - value;
-      wetGainRef.current.gain.value = value;
+  const updateVolume = (value: number) => {
+    setVolume(value);
+    if (dryGainRef.current) {
+      dryGainRef.current.gain.value = value;
     }
   };
 
-  const updateVolume = (value: number) => {
-    setVolume(value);
-    if (gainNodeRef.current) {
-      gainNodeRef.current.gain.value = value;
+  const updateHarmonyVolume = (value: number) => {
+    setHarmonyVolume(value);
+    if (wetGainRef.current) {
+      wetGainRef.current.gain.value = value;
     }
   };
 
@@ -172,20 +187,7 @@ export default function AutoTune() {
           {/* Sliders */}
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm text-gray-300">Effect Mix</label>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={effectMix}
-                onChange={(e) => updateEffectMix(parseFloat(e.target.value))}
-                className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm text-gray-300">Output Volume</label>
+              <label className="text-sm text-gray-300">Original Voice Volume</label>
               <input
                 type="range"
                 min="0"
@@ -196,26 +198,50 @@ export default function AutoTune() {
                 className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
               />
             </div>
+
+            <div className="space-y-2">
+              <label className="text-sm text-gray-300">Harmony Volume</label>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={harmonyVolume}
+                onChange={(e) => updateHarmonyVolume(parseFloat(e.target.value))}
+                className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
           </div>
         </div>
 
         {/* Note Display */}
         <div className="text-center p-8 bg-gray-700 rounded-xl">
-          <h2 className="text-xl font-semibold mb-4 text-gray-300">Current Note</h2>
-          <div className="text-6xl font-bold bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent">
-            {audioState.note}
-          </div>
-          {audioState.clarity > 0.8 && (
-            <div className="mt-2 text-sm text-gray-400">
-              Frequency: {Math.round(audioState.pitch)}Hz
+          <h2 className="text-xl font-semibold mb-4 text-gray-300">Current Notes</h2>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm text-gray-400">Your Note</p>
+              <div className="text-4xl font-bold bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent">
+                {audioState.note}
+              </div>
             </div>
-          )}
+            <div>
+              <p className="text-sm text-gray-400">Harmony Note</p>
+              <div className="text-4xl font-bold bg-gradient-to-r from-purple-500 to-pink-500 bg-clip-text text-transparent">
+                {audioState.harmonyNote}
+              </div>
+            </div>
+            {audioState.clarity > 0.8 && (
+              <div className="mt-2 text-sm text-gray-400">
+                Base Frequency: {Math.round(audioState.pitch)}Hz
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Instructions */}
         <div className="text-sm text-gray-400 text-center">
-          <p>Adjust the Effect Mix slider to balance between your original voice and the autotuned effect.</p>
-          <p>Use the Output Volume slider to control the overall volume.</p>
+          <p>Adjust the Original Voice Volume to control your voice level.</p>
+          <p>Use the Harmony Volume to control the generated harmony note.</p>
         </div>
       </div>
     </div>
